@@ -7,6 +7,10 @@
 #define WIFI_SSID     "YourNetworkName"
 #define WIFI_PASSWORD "YourNetworkPassword"
 
+// ===== Stream Login Credentials =====
+#define STREAM_USERNAME "admin"
+#define STREAM_PASSWORD "changeme"
+
 // ===== Static IP Configuration (Optional) =====
 // Uncomment STATIC_IP_ADDR (and the related lines below) to use a fixed
 // IP address. Leave it commented out to use DHCP instead.

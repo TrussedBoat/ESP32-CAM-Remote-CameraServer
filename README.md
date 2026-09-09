@@ -38,6 +38,13 @@ Then edit `include/wifi_config.h`:
 
 Optional: Enable static IP by uncommenting `STATIC_IP_ADDR` and related lines.
 
+The same file also holds the stream's login credentials (see [Authentication](#authentication) below):
+
+```cpp
+#define STREAM_USERNAME "admin"
+#define STREAM_PASSWORD "changeme"
+```
+
 ### 2. Build and Upload
 
 ```bash
@@ -64,9 +71,9 @@ Connected. IP address: <board-ip>
 Stream ready at http://<board-ip>/stream
 ```
 
-Open your browser and visit:
-- **Live stream:** `http://<board-ip>/stream`
-- **Web viewer:** `http://<board-ip>/` (has embedded `<img>` pointing to `/stream`)
+Open your browser and visit `http://<board-ip>/` — you'll be redirected to a login
+page. Sign in with the `STREAM_USERNAME`/`STREAM_PASSWORD` you set in
+`include/wifi_config.h` to reach the viewer (embedded `<img>` pointing to `/stream`).
 
 ## How It Works
 
@@ -110,10 +117,36 @@ if (psramFound()) {
 }
 ```
 
+### Authentication
+
+The stream is gated behind a login page (`/login`) backed by a session cookie. Set
+credentials in `include/wifi_config.h`:
+
+```cpp
+#define STREAM_USERNAME "admin"
+#define STREAM_PASSWORD "changeme"
+```
+
+Notes on how it works:
+- **Single active session** — logging in from another device/browser replaces the
+  current session. This is a one-viewer home device, not a multi-user server.
+  Visit `/logout` to end the current session manually.
+- **Sessions don't survive a reboot** — the session token lives only in RAM.
+- **Plaintext HTTP, no TLS** — fine on a trusted LAN. If you ever expose this stream
+  to the internet (e.g. via router port forwarding), put it behind a VPN back to your
+  home network rather than forwarding the login directly — the credentials and
+  session cookie are not encrypted in transit.
+
 ### Memory Usage
 
-- **Flash:** ~835 KB of 4 MB (leaves room for OTA updates, SPIFFS)
-- **SRAM:** ~164 KB static, plus ~150 KB for frame buffer and WiFi stack at runtime
+- **Flash:** ~836 KB of 3 MB app partition (~27%), leaving plenty of room for growth
+- **RAM:** ~49 KB static (~15% of 320 KB), plus frame buffer and WiFi stack allocated at runtime
+
+Check current usage yourself after building:
+```bash
+pio run
+~/.platformio/packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-size -B .pio/build/esp32cam/firmware.elf
+```
 
 See [CLAUDE.md](CLAUDE.md) for detailed memory layout.
 
@@ -147,7 +180,6 @@ If still failing, the camera ribbon cable may be loose. Reseat it on the ESP32-C
 ## Next Steps
 
 Potential improvements:
-- **Authentication** — password-protect the stream
 - **Quality selector** — runtime JPEG quality control
 - **Camera settings** — brightness, contrast, saturation UI
 - **Remote firmware update** — flash new firmware over WiFi (OTA) instead of USB

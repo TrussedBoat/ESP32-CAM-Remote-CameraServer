@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_camera.h>
+#include <esp_random.h>
 #include "wifi_config.h"
 #include "camera_pins.h"
 
@@ -8,6 +9,10 @@ static const char *STREAM_BOUNDARY = "esp32camframe";
 static const char *STREAM_PART_HEADER = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 WiFiServer server(80);
+
+String activeSessionToken = "";
+unsigned long sessionCreatedAt = 0;
+const unsigned long SESSION_DURATION_MS = 3600000UL; // 1 hour
 
 bool initCamera() {
   camera_config_t config = {};
@@ -81,6 +86,130 @@ void connectToWiFi() {
   Serial.println();
   Serial.print("Connected. IP address: ");
   Serial.println(WiFi.localIP());
+}
+
+String generateSessionToken() {
+  String token = "";
+  for (int i = 0; i < 4; i++) {
+    char buf[9];
+    snprintf(buf, sizeof(buf), "%08x", (unsigned int)esp_random());
+    token += buf;
+  }
+  return token;
+}
+
+bool isSessionValid(const String &cookieHeader) {
+  if (activeSessionToken.length() == 0) {
+    return false;
+  }
+
+  int idx = cookieHeader.indexOf("session=");
+  if (idx < 0) {
+    return false;
+  }
+
+  String token = cookieHeader.substring(idx + 8);
+  int semi = token.indexOf(';');
+  if (semi >= 0) {
+    token = token.substring(0, semi);
+  }
+  token.trim();
+
+  if (token != activeSessionToken) {
+    return false;
+  }
+
+  return (unsigned long)(millis() - sessionCreatedAt) < SESSION_DURATION_MS;
+}
+
+String urlDecode(const String &s) {
+  String out = "";
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '+') {
+      out += ' ';
+    } else if (c == '%' && i + 2 < s.length()) {
+      char hex[3] = {s[i + 1], s[i + 2], '\0'};
+      out += (char)strtol(hex, nullptr, 16);
+      i += 2;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+void redirectTo(WiFiClient &client, const String &path) {
+  client.println("HTTP/1.1 302 Found");
+  client.print("Location: ");
+  client.println(path);
+  client.println("Connection: close");
+  client.println();
+}
+
+void handleLoginPage(WiFiClient &client, bool showError) {
+  String html =
+      "<!DOCTYPE html><html><head><title>ESP32-CAM Login</title></head>"
+      "<body style=\"font-family:sans-serif;display:flex;justify-content:center;"
+      "align-items:center;height:100vh;margin:0;background:#111;color:#eee\">"
+      "<form method=\"POST\" action=\"/login\" style=\"background:#222;padding:2rem;"
+      "border-radius:8px;min-width:220px\">"
+      "<h2 style=\"margin-top:0\">ESP32-CAM Login</h2>";
+
+  if (showError) {
+    html += "<p style=\"color:#f66\">Invalid username or password</p>";
+  }
+
+  html +=
+      "<input name=\"username\" placeholder=\"Username\" style=\"display:block;"
+      "margin-bottom:1rem;padding:0.5rem;width:100%;box-sizing:border-box\">"
+      "<input name=\"password\" type=\"password\" placeholder=\"Password\" "
+      "style=\"display:block;margin-bottom:1rem;padding:0.5rem;width:100%;"
+      "box-sizing:border-box\">"
+      "<button type=\"submit\" style=\"width:100%;padding:0.5rem\">Log In</button>"
+      "</form></body></html>";
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.printf("Content-Length: %u\r\n", html.length());
+  client.println("Connection: close");
+  client.println();
+  client.print(html);
+}
+
+void handleLoginSubmit(WiFiClient &client, const String &body) {
+  String username, password;
+
+  int userIdx = body.indexOf("username=");
+  int passIdx = body.indexOf("password=");
+
+  if (userIdx >= 0) {
+    int end = body.indexOf('&', userIdx);
+    username = urlDecode(body.substring(userIdx + 9, end < 0 ? body.length() : end));
+  }
+  if (passIdx >= 0) {
+    int end = body.indexOf('&', passIdx);
+    password = urlDecode(body.substring(passIdx + 9, end < 0 ? body.length() : end));
+  }
+
+  if (username == STREAM_USERNAME && password == STREAM_PASSWORD) {
+    activeSessionToken = generateSessionToken();
+    sessionCreatedAt = millis();
+
+    client.println("HTTP/1.1 302 Found");
+    client.println("Location: /");
+    client.print("Set-Cookie: session=");
+    client.println(activeSessionToken);
+    client.println("Connection: close");
+    client.println();
+  } else {
+    redirectTo(client, "/login?error=1");
+  }
+}
+
+void handleLogout(WiFiClient &client) {
+  activeSessionToken = "";
+  redirectTo(client, "/login");
 }
 
 void handleRoot(WiFiClient &client) {
@@ -164,10 +293,49 @@ void loop() {
   String request = client.readStringUntil('\r');
   client.readStringUntil('\n');
 
-  if (request.indexOf("GET /stream") >= 0) {
-    handleStream(client);
+  String cookieHeader;
+  int contentLength = 0;
+
+  while (client.connected()) {
+    String line = client.readStringUntil('\r');
+    client.readStringUntil('\n');
+    if (line.length() == 0) {
+      break;
+    }
+    if (line.startsWith("Cookie:")) {
+      cookieHeader = line;
+    } else if (line.startsWith("Content-Length:")) {
+      contentLength = line.substring(15).toInt();
+    }
+  }
+
+  bool authed = isSessionValid(cookieHeader);
+
+  if (request.indexOf("POST /login") >= 0) {
+    contentLength = min(contentLength, 255);
+    char body[256] = {0};
+    client.readBytes(body, contentLength);
+    handleLoginSubmit(client, String(body));
+  } else if (request.indexOf("GET /login") >= 0) {
+    handleLoginPage(client, request.indexOf("error=1") >= 0);
+  } else if (request.indexOf("GET /logout") >= 0) {
+    handleLogout(client);
+  } else if (request.indexOf("GET /stream") >= 0) {
+    if (authed) {
+      handleStream(client);
+    } else {
+      client.println("HTTP/1.1 401 Unauthorized");
+      client.println("Content-Type: text/plain");
+      client.println("Connection: close");
+      client.println();
+      client.println("Login required");
+    }
   } else if (request.indexOf("GET / ") >= 0) {
-    handleRoot(client);
+    if (authed) {
+      handleRoot(client);
+    } else {
+      redirectTo(client, "/login");
+    }
   } else {
     handleNotFound(client);
   }
