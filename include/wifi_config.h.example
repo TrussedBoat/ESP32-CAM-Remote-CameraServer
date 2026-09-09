@@ -1,0 +1,18 @@
+#pragma once
+
+// Copy this file to wifi_config.h and fill in your own values.
+// wifi_config.h is gitignored so your credentials are never committed.
+
+// ===== WiFi Credentials =====
+#define WIFI_SSID     "YourNetworkName"
+#define WIFI_PASSWORD "YourNetworkPassword"
+
+// ===== Static IP Configuration (Optional) =====
+// Uncomment STATIC_IP_ADDR (and the related lines below) to use a fixed
+// IP address. Leave it commented out to use DHCP instead.
+
+// #define STATIC_IP_ADDR 192, 168, 1, 184
+// #define STATIC_GATEWAY 192, 168, 1, 1
+// #define STATIC_SUBNET  255, 255, 255, 0
+// #define STATIC_DNS1    8, 8, 8, 8
+// #define STATIC_DNS2    8, 8, 4, 4
