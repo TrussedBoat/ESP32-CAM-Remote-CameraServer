@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>ESP32-CAM</title>
+</head>
+
+<body style="margin:0;background:#111;color:#eee;font-family:sans-serif;text-align:center;padding:20px">
+
+    <div style="display:inline-block;padding:8px;background:#222;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.5)">
+        <img id="streamImg" src="/stream" style="max-width:100%;height:auto;border-radius:6px;display:block">
+    </div>
+
+    <div style="margin-top:16px">
+        <button onclick="toggleSettings()" style="padding:0.5rem 1rem">Settings</button>
+    </div>
+
+    <div id="settingsPanel" hidden
+        style="max-width:320px;margin:16px auto;background:#222;padding:1.5rem;border-radius:8px;text-align:left">
+        <form onsubmit="saveSettings(event)">
+            <label style="display:block;margin-bottom:0.25rem">New Username</label>
+            <input name="username" placeholder="(unchanged)"
+                style="display:block;margin-bottom:1rem;padding:0.5rem;width:100%;box-sizing:border-box">
+
+            <label style="display:block;margin-bottom:0.25rem">New Password</label>
+            <input name="password" type="password" placeholder="(unchanged)"
+                style="display:block;margin-bottom:1rem;padding:0.5rem;width:100%;box-sizing:border-box">
+
+            <label style="display:block;margin-bottom:0.25rem">Resolution</label>
+            <select name="resolution"
+                style="display:block;margin-bottom:1rem;padding:0.5rem;width:100%;box-sizing:border-box">
+                <option value="">(unchanged)</option>
+                <option value="vga">VGA (640x480)</option>
+                <option value="svga">SVGA (800x600)</option>
+                <option value="xga">XGA (1024x768)</option>
+            </select>
+
+            <label style="display:block;margin-bottom:0.25rem">Quality</label>
+            <select name="quality"
+                style="display:block;margin-bottom:1rem;padding:0.5rem;width:100%;box-sizing:border-box">
+                <option value="">(unchanged)</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+            </select>
+
+            <button type="submit" style="width:100%;padding:0.5rem">Save</button>
+            <p id="settingsStatus" style="min-height:1.2em;margin-bottom:0"></p>
+        </form>
+    </div>
+
+    <script>
+        function toggleSettings() {
+            var panel = document.getElementById('settingsPanel');
+            panel.hidden = !panel.hidden;
+        }
+
+        function saveSettings(event) {
+            event.preventDefault();
+            var img = document.getElementById('streamImg');
+            var status = document.getElementById('settingsStatus');
+            var data = new URLSearchParams(new FormData(event.target));
+
+            img.src = ''; // release the active /stream connection so /settings can be processed
+            status.textContent = 'Saving...';
+
+            fetch('/settings', { method: 'POST', body: data })
+                .then(function (res) { return res.text(); })
+                .then(function (text) {
+                    status.textContent = text;
+                    img.src = '/stream?' + Date.now();
+                })
+                .catch(function () {
+                    status.textContent = 'Request failed';
+                    img.src = '/stream?' + Date.now();
+                });
+        }
+    </script>
+
+</body>
+
+</html>

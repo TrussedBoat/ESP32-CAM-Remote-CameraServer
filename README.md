@@ -73,7 +73,10 @@ Stream ready at http://<board-ip>/stream
 
 Open your browser and visit `http://<board-ip>/` — you'll be redirected to a login
 page. Sign in with the `STREAM_USERNAME`/`STREAM_PASSWORD` you set in
-`include/wifi_config.h` to reach the viewer (embedded `<img>` pointing to `/stream`).
+`include/wifi_config.h` to reach the viewer: the stream in a boxed frame, plus a
+collapsible **Settings** panel for changing the login password, resolution, and JPEG
+quality without reflashing (see [Authentication](#authentication) and
+[Resolution & Quality](#resolution--quality) below).
 
 ## How It Works
 
@@ -83,6 +86,18 @@ page. Sign in with the `STREAM_USERNAME`/`STREAM_PASSWORD` you set in
 - **OV2640 Camera:** 2MP sensor connected via parallel I2C/DVP interface
 - **PSRAM:** 4 MB external RAM for frame buffers
 
+### Page Templates
+
+HTML pages live in `include/pages/` as `*_html.h` files — each is a C++ header holding
+the markup as a raw string constant (e.g. `ROOT_HTML` in `root_html.h`), included
+directly into `main.cpp` and sent to the client as-is. No template engine, no
+filesystem — it's just compiled into the firmware binary.
+
+Each `*_html.h` has a matching plain `.html` file with the same name (e.g. `root.html`)
+for previewing layout/CSS changes directly in a browser before touching any C++ — open
+it locally, iterate on the design, then port the finished markup into the `.h` file's
+raw string. The plain `.html` files aren't served by the firmware; they're a local-only
+editing convenience and `/stream`, `/settings`, etc. won't resolve when opened that way.
 
 ### Frame Pipeline
 
@@ -93,45 +108,62 @@ page. Sign in with the `STREAM_USERNAME`/`STREAM_PASSWORD` you set in
 5. **handleStream()** calls `esp_camera_fb_return()` to release the buffer for reuse
 6. Loop continues at step 3 (~1-10 FPS depending on resolution and network load)
 
-### Dual-Core Note
+### Concurrency Note
 
-The **WiFi stack runs on Core 1** automatically (part of the Arduino framework). Your `loop()` runs on **Core 0**. This is why we use flags and the `volatile` keyword for safe communication between them — see [src/main.cpp](src/main.cpp) for details.
+This server handles **one client connection at a time**, synchronously, inside `loop()`
+— there's no async framework and no separate request-handling task. While
+`handleStream()` is serving a video connection, `loop()` is blocked inside it and can't
+accept or process any other request (e.g. a `/settings` change) until that connection
+closes. The settings page's JavaScript accounts for this: saving settings clears the
+`<img>`'s `src` first (releasing the `/stream` connection) before POSTing to
+`/settings`, then reconnects afterward. This also means camera reconfiguration
+(`reconfigureCamera()` in [src/main.cpp](src/main.cpp)) never races with an active
+stream — by the time it runs, `loop()` has already finished with the previous client.
 
 ## Configuration
 
 ### Resolution & Quality
 
-Edit `src/main.cpp` in `initCamera()`:
+**At runtime:** open the **Settings** panel on `/` and pick a resolution (VGA 640×480,
+SVGA 800×600, or XGA 1024×768) and quality (High/Medium/Low). This calls
+`reconfigureCamera()`, which deinitializes and reinitializes the camera driver with the
+new settings — takes under a second, and the video reconnects automatically once done.
+Changes made this way **don't survive a reboot**; they reset to the defaults below.
+
+**Defaults at boot** — edit `initCamera()` in `src/main.cpp` to change these:
 
 ```cpp
-if (psramFound()) {
-  config.frame_size = FRAMESIZE_SVGA;      // 1024×768, high resolution
-  config.jpeg_quality = 10;                 // 0-63, lower = better quality
-  config.fb_count = 2;                      // Double-buffering
-  config.fb_location = CAMERA_FB_IN_PSRAM;  // Use external RAM
-} else {
-  config.frame_size = FRAMESIZE_CIF;        // 352×288, low resolution (no PSRAM)
-  config.jpeg_quality = 12;
-  config.fb_count = 1;                      // Single buffer
-  config.fb_location = CAMERA_FB_IN_DRAM;   // Use internal RAM only
-}
+currentFrameSize = psramFound() ? FRAMESIZE_SVGA : FRAMESIZE_CIF;  // 800x600 / 400x296
+currentJpegQuality = psramFound() ? 10 : 12;                        // 0-63, lower = better quality
 ```
+
+With PSRAM, `fb_count = 2` (double-buffering); without it, `fb_count = 1` and frames
+live in internal DRAM instead — see `buildCameraConfig()` for the full config.
 
 ### Authentication
 
-The stream is gated behind a login page (`/login`) backed by a session cookie. Set
-credentials in `include/wifi_config.h`:
+The stream is gated behind a login page (`/login`) backed by a session cookie. The
+initial credentials come from `include/wifi_config.h`:
 
 ```cpp
 #define STREAM_USERNAME "admin"
 #define STREAM_PASSWORD "changeme"
 ```
 
+They can also be changed at runtime from the **Settings** panel on `/` — leave a field
+blank there to keep it unchanged. Like the resolution/quality settings, a runtime
+password change **doesn't survive a reboot**: after a power cycle, credentials revert
+to whatever's compiled into `wifi_config.h`.
+
 Notes on how it works:
 - **Single active session** — logging in from another device/browser replaces the
   current session. This is a one-viewer home device, not a multi-user server.
-  Visit `/logout` to end the current session manually.
+  Visit `/logout` to end the current session manually. Changing the password does
+  *not* invalidate an already-active session.
 - **Sessions don't survive a reboot** — the session token lives only in RAM.
+- **No re-authentication for settings changes** — anyone with an active session can
+  change the password or camera settings without re-entering the current password.
+  Fine for a single-user home device; worth knowing if that assumption ever changes.
 - **Plaintext HTTP, no TLS** — fine on a trusted LAN. If you ever expose this stream
   to the internet (e.g. via router port forwarding), put it behind a VPN back to your
   home network rather than forwarding the login directly — the credentials and
@@ -180,8 +212,8 @@ If still failing, the camera ribbon cable may be loose. Reseat it on the ESP32-C
 ## Next Steps
 
 Potential improvements:
-- **Quality selector** — runtime JPEG quality control
-- **Camera settings** — brightness, contrast, saturation UI
+- **More camera settings** — brightness, contrast, saturation UI
+- **Persist runtime settings** — save password/resolution/quality changes across reboots (e.g. via `Preferences`/NVS)
 - **Remote firmware update** — flash new firmware over WiFi (OTA) instead of USB
 
 ## References

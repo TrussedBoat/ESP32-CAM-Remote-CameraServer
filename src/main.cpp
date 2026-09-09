@@ -4,6 +4,8 @@
 #include <esp_random.h>
 #include "wifi_config.h"
 #include "camera_pins.h"
+#include "pages/login_html.h"
+#include "pages/root_html.h"
 
 static const char *STREAM_BOUNDARY = "esp32camframe";
 static const char *STREAM_PART_HEADER = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
@@ -14,7 +16,13 @@ String activeSessionToken = "";
 unsigned long sessionCreatedAt = 0;
 const unsigned long SESSION_DURATION_MS = 3600000UL; // 1 hour
 
-bool initCamera() {
+String currentUsername = STREAM_USERNAME;
+String currentPassword = STREAM_PASSWORD;
+
+framesize_t currentFrameSize;
+int currentJpegQuality;
+
+camera_config_t buildCameraConfig(framesize_t frameSize, int quality) {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -37,24 +45,51 @@ bool initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.frame_size = frameSize;
+  config.jpeg_quality = quality;
 
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 10;
     config.fb_count = 2;
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
-    config.frame_size = FRAMESIZE_CIF;
-    config.jpeg_quality = 12;
     config.fb_count = 1;
     config.fb_location = CAMERA_FB_IN_DRAM;
   }
 
+  return config;
+}
+
+bool initCamera() {
+  // FRAMESIZE_SVGA = 800x600, FRAMESIZE_CIF (this library's value) = 400x296.
+  currentFrameSize = psramFound() ? FRAMESIZE_SVGA : FRAMESIZE_CIF;
+  currentJpegQuality = psramFound() ? 10 : 12;
+
+  camera_config_t config = buildCameraConfig(currentFrameSize, currentJpegQuality);
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed: 0x%x\n", err);
     return false;
   }
+  return true;
+}
+
+// Only safe to call when no client is actively mid-stream: this server handles
+// one connection at a time in loop(), so as long as the caller (handleSettings)
+// runs from that same loop, the camera is guaranteed idle here.
+bool reconfigureCamera(framesize_t frameSize, int quality) {
+  esp_camera_deinit();
+
+  camera_config_t config = buildCameraConfig(frameSize, quality);
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera reconfigure failed: 0x%x\n", err);
+    camera_config_t fallback = buildCameraConfig(currentFrameSize, currentJpegQuality);
+    esp_camera_init(&fallback);
+    return false;
+  }
+
+  currentFrameSize = frameSize;
+  currentJpegQuality = quality;
   return true;
 }
 
@@ -139,6 +174,17 @@ String urlDecode(const String &s) {
   return out;
 }
 
+String extractFormField(const String &body, const String &name) {
+  String key = name + "=";
+  int idx = body.indexOf(key);
+  if (idx < 0) {
+    return "";
+  }
+  int valueStart = idx + key.length();
+  int end = body.indexOf('&', valueStart);
+  return urlDecode(body.substring(valueStart, end < 0 ? body.length() : end));
+}
+
 void redirectTo(WiFiClient &client, const String &path) {
   client.println("HTTP/1.1 302 Found");
   client.print("Location: ");
@@ -148,26 +194,11 @@ void redirectTo(WiFiClient &client, const String &path) {
 }
 
 void handleLoginPage(WiFiClient &client, bool showError) {
-  String html =
-      "<!DOCTYPE html><html><head><title>ESP32-CAM Login</title></head>"
-      "<body style=\"font-family:sans-serif;display:flex;justify-content:center;"
-      "align-items:center;height:100vh;margin:0;background:#111;color:#eee\">"
-      "<form method=\"POST\" action=\"/login\" style=\"background:#222;padding:2rem;"
-      "border-radius:8px;min-width:220px\">"
-      "<h2 style=\"margin-top:0\">ESP32-CAM Login</h2>";
-
+  String html = LOGIN_HTML_HEAD;
   if (showError) {
-    html += "<p style=\"color:#f66\">Invalid username or password</p>";
+    html += LOGIN_HTML_ERROR;
   }
-
-  html +=
-      "<input name=\"username\" placeholder=\"Username\" style=\"display:block;"
-      "margin-bottom:1rem;padding:0.5rem;width:100%;box-sizing:border-box\">"
-      "<input name=\"password\" type=\"password\" placeholder=\"Password\" "
-      "style=\"display:block;margin-bottom:1rem;padding:0.5rem;width:100%;"
-      "box-sizing:border-box\">"
-      "<button type=\"submit\" style=\"width:100%;padding:0.5rem\">Log In</button>"
-      "</form></body></html>";
+  html += LOGIN_HTML_FORM;
 
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
@@ -178,21 +209,10 @@ void handleLoginPage(WiFiClient &client, bool showError) {
 }
 
 void handleLoginSubmit(WiFiClient &client, const String &body) {
-  String username, password;
+  String username = extractFormField(body, "username");
+  String password = extractFormField(body, "password");
 
-  int userIdx = body.indexOf("username=");
-  int passIdx = body.indexOf("password=");
-
-  if (userIdx >= 0) {
-    int end = body.indexOf('&', userIdx);
-    username = urlDecode(body.substring(userIdx + 9, end < 0 ? body.length() : end));
-  }
-  if (passIdx >= 0) {
-    int end = body.indexOf('&', passIdx);
-    password = urlDecode(body.substring(passIdx + 9, end < 0 ? body.length() : end));
-  }
-
-  if (username == STREAM_USERNAME && password == STREAM_PASSWORD) {
+  if (username == currentUsername && password == currentPassword) {
     activeSessionToken = generateSessionToken();
     sessionCreatedAt = millis();
 
@@ -212,12 +232,59 @@ void handleLogout(WiFiClient &client) {
   redirectTo(client, "/login");
 }
 
+void handleSettings(WiFiClient &client, const String &body) {
+  String usernameParam = extractFormField(body, "username");
+  String passwordParam = extractFormField(body, "password");
+  String resolutionParam = extractFormField(body, "resolution");
+  String qualityParam = extractFormField(body, "quality");
+
+  if (usernameParam.length() > 0) {
+    currentUsername = usernameParam;
+  }
+  if (passwordParam.length() > 0) {
+    currentPassword = passwordParam;
+  }
+
+  framesize_t newFrameSize = currentFrameSize;
+  int newQuality = currentJpegQuality;
+  bool cameraChanged = false;
+
+  if (resolutionParam == "vga") {
+    newFrameSize = FRAMESIZE_VGA; // 640x480
+    cameraChanged = true;
+  } else if (resolutionParam == "svga") {
+    newFrameSize = FRAMESIZE_SVGA; // 800x600
+    cameraChanged = true;
+  } else if (resolutionParam == "xga") {
+    newFrameSize = FRAMESIZE_XGA; // 1024x768
+    cameraChanged = true;
+  }
+
+  if (qualityParam == "high") {
+    newQuality = 10;
+    cameraChanged = true;
+  } else if (qualityParam == "medium") {
+    newQuality = 20;
+    cameraChanged = true;
+  } else if (qualityParam == "low") {
+    newQuality = 35;
+    cameraChanged = true;
+  }
+
+  bool cameraOk = true;
+  if (cameraChanged) {
+    cameraOk = reconfigureCamera(newFrameSize, newQuality);
+  }
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/plain");
+  client.println("Connection: close");
+  client.println();
+  client.println(cameraOk ? "OK" : "Camera reconfigure failed");
+}
+
 void handleRoot(WiFiClient &client) {
-  String html =
-      "<!DOCTYPE html><html><head><title>ESP32-CAM</title></head>"
-      "<body style=\"margin:0;background:#111;text-align:center\">"
-      "<img src=\"/stream\" style=\"max-width:100%;height:auto\">"
-      "</body></html>";
+  String html = ROOT_HTML;
 
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
@@ -316,6 +383,19 @@ void loop() {
     char body[256] = {0};
     client.readBytes(body, contentLength);
     handleLoginSubmit(client, String(body));
+  } else if (request.indexOf("POST /settings") >= 0) {
+    if (authed) {
+      contentLength = min(contentLength, 255);
+      char body[256] = {0};
+      client.readBytes(body, contentLength);
+      handleSettings(client, String(body));
+    } else {
+      client.println("HTTP/1.1 401 Unauthorized");
+      client.println("Content-Type: text/plain");
+      client.println("Connection: close");
+      client.println();
+      client.println("Login required");
+    }
   } else if (request.indexOf("GET /login") >= 0) {
     handleLoginPage(client, request.indexOf("error=1") >= 0);
   } else if (request.indexOf("GET /logout") >= 0) {
